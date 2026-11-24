@@ -1,0 +1,95 @@
+# Function-difference register: Snowflake -> Databricks SQL.
+#
+# Each entry is a behaviour that can silently change results after
+# translation. `auto_fix: true` means the translator rewrites it; otherwise it
+# is reported for a human decision. Keep entries short and testable.
+#
+# risk: high = results change silently | medium = may change, check | low = cosmetic / type only
+
+- id: DIFF-DATEDIFF
+  title: DATEDIFF counts boundaries in Snowflake, whole units in Databricks
+  snowflake: DATEDIFF(year, '2025-12-31', '2026-01-01') = 1 (one year boundary crossed)
+  databricks: DATEDIFF(YEAR, ...) = 0 (no complete year)
+  risk: high
+  auto_fix: true
+  fix: DATEDIFF(unit, date_trunc(unit, start), date_trunc(unit, end)). WEEK is reported instead, because week start depends on the Snowflake WEEK_START setting.
+
+- id: DIFF-TRY-TO-NUMBER
+  title: TRY_TO_NUMBER defaults to NUMBER(38,0); a plain translation becomes DOUBLE
+  snowflake: TRY_TO_NUMBER('12.7') = 13 (scale 0, rounded)
+  databricks: TRY_CAST('12.7' AS DOUBLE) = 12.7
+  risk: high
+  auto_fix: true
+  fix: TRY_CAST(x AS DECIMAL(precision, scale)) with Snowflake's defaults (38, 0)
+
+- id: DIFF-SPLIT-PART-ZERO
+  title: SPLIT_PART index 0 means "first part" in Snowflake; Databricks rejects 0
+  snowflake: SPLIT_PART('a-b', '-', 0) = 'a'
+  databricks: error for part number 0
+  risk: high
+  auto_fix: true
+  fix: literal 0 becomes 1; a column index becomes CASE WHEN i = 0 THEN 1 ELSE i END
+
+- id: DIFF-NULL-ORDER
+  title: Default NULL ordering is opposite
+  snowflake: ASC sorts NULLs last, DESC sorts NULLs first
+  databricks: ASC sorts NULLs first, DESC sorts NULLs last
+  risk: high
+  auto_fix: true
+  fix: explicit NULLS LAST / NULLS FIRST on every ORDER BY (sqlglot does this)
+
+- id: DIFF-FLATTEN
+  title: LATERAL FLATTEN has no direct Databricks equivalent
+  snowflake: LATERAL FLATTEN(input => col) exposes SEQ, KEY, PATH, INDEX, VALUE, THIS
+  databricks: explode / posexplode / variant_explode, with different output columns
+  risk: high
+  auto_fix: false
+  fix: rewrite by hand, e.g. LATERAL VIEW posexplode(from_json(col, 'array<...>')) AS idx, value
+
+- id: DIFF-JSON-PATH
+  title: Semi-structured path access returns different types
+  snowflake: v:a.b returns VARIANT; compare or cast explicitly
+  databricks: col:a.b on a STRING column returns STRING; on VARIANT returns VARIANT
+  risk: medium
+  auto_fix: false
+  fix: cast every extracted value explicitly, and check key casing and missing keys against real data
+
+- id: DIFF-OBJECT-CONSTRUCT
+  title: OBJECT_CONSTRUCT becomes a STRUCT
+  snowflake: OBJECT (semi-structured, keys can be dynamic, NULL values dropped)
+  databricks: STRUCT (fixed schema)
+  risk: medium
+  auto_fix: false
+  fix: if the result is serialised, wrap in to_json() and compare the strings; NULL-valued keys differ
+
+- id: DIFF-ORDERED-AGG
+  title: Ordered aggregates (LISTAGG / ARRAY_AGG WITHIN GROUP)
+  snowflake: order guaranteed by WITHIN GROUP
+  databricks: collect_list order is not guaranteed unless sorted explicitly
+  risk: medium
+  auto_fix: false
+  fix: array_sort / sort_array over structs, or array_join(...) after sorting; verify on your runtime
+
+- id: DIFF-DIVISION
+  title: Division result types differ
+  snowflake: NUMBER / NUMBER returns NUMBER with extra scale
+  databricks: integer / integer returns DOUBLE (or DECIMAL for decimal inputs)
+  risk: low
+  auto_fix: false
+  fix: compare numeric results with a tolerance or round both sides to the business precision
+
+- id: DIFF-TIMEZONE
+  title: Session time zone and timestamp flavours
+  snowflake: TIMESTAMP defaults to TIMESTAMP_NTZ; CURRENT_TIMESTAMP is TIMESTAMP_LTZ in the session zone
+  databricks: TIMESTAMP is session-local (LTZ); TIMESTAMP_NTZ must be explicit
+  risk: medium
+  auto_fix: false
+  fix: pin both sessions to UTC, and use TIMESTAMP_NTZ where Snowflake used NTZ
+
+- id: DIFF-DATE-WEEK
+  title: Week boundaries depend on WEEK_START / WEEK_OF_YEAR_POLICY
+  snowflake: configurable per session
+  databricks: weeks start on Monday (ISO)
+  risk: medium
+  auto_fix: false
+  fix: confirm the Snowflake account's WEEK_START; rewrite week maths explicitly if it is not ISO
