@@ -6,7 +6,7 @@ SELECT
     COUNT(*)                                              AS orders,
     SUM(NVL(amount, 0))                                   AS revenue,
     DATEDIFF(day, MIN(created_at), MAX(shipped_at))       AS max_days_to_ship,
-    TRY_TO_NUMBER(discount_code_pct)                      AS discount_pct
+    MAX(TRY_TO_NUMBER(discount_code_pct))                 AS max_discount_pct
 FROM sales.orders
 WHERE order_date >= DATEADD(month, -3, CURRENT_DATE())
 GROUP BY 1, 2, 3
